@@ -22,6 +22,7 @@ class PHPCSFixer {
     constructor() {
         this.loadSettings();
         this.checkUpdate();
+        // window.showInformationMessage('junstyle.php-cs-fixe is ready');
     }
 
     loadSettings() {
@@ -29,12 +30,13 @@ class PHPCSFixer {
         this.onsave = config.get('onsave', false);
         this.autoFixByBracket = config.get('autoFixByBracket', true);
         this.autoFixBySemicolon = config.get('autoFixBySemicolon', false);
-        this.executablePath = config.get('executablePath', process.platform === "win32" ? 'php-cs-fixer.bat' : 'php-cs-fixer');
+        this.executablePathList = config.get('executablePath', process.platform === "win32" ? 'php-cs-fixer.bat' : 'php-cs-fixer').split(';');
         if (process.platform == "win32" && config.has('executablePathWindows') && config.get('executablePathWindows').length > 0) {
-            this.executablePath = config.get('executablePathWindows');
+            this.executablePathList = config.get('executablePathWindows').split(';');
         }
-        this.executablePath = this.executablePath.replace('${extensionPath}', __dirname);
-        this.executablePath = this.executablePath.replace(/^~\//, os.homedir() + '/');
+        this.executablePathList = this.executablePathList.map(executablePath => executablePath.replace('${extensionPath}', __dirname));
+        this.executablePathList = this.executablePathList.map(executablePath => executablePath.replace(/^~\//, os.homedir() + '/'));
+        this.executablePathList = this.executablePathList.filter(executablePath => executablePath && executablePath.length);
         this.rules = config.get('rules', '@PSR2');
         if (typeof (this.rules) == 'object') {
             this.rules = JSON.stringify(this.rules);
@@ -47,15 +49,17 @@ class PHPCSFixer {
         this.exclude = config.get('exclude', []);
         this.showOutput = config.get('showOutput', true);
 
-        if (this.executablePath.endsWith(".phar")) {
-            this.pharPath = this.executablePath.replace(/^php[^ ]* /i, '');
-            this.executablePath = workspace.getConfiguration('php').get('validate.executablePath', 'php');
-            if (this.executablePath == null || this.executablePath.length == 0) {
-                this.executablePath = 'php';
+        this.pharPaths = [];
+        this.executablePathList.forEach(executablePath => {
+            if (executablePath.endsWith('.phar')) {
+                executablePath = executablePath.replace(/^php[^ ]* /i, '');
+                if (executablePath && executablePath.length) {
+                    this.pharPaths.push(executablePath);
+                }
             }
-        } else {
-            this.pharPath = null;
-        }
+        });
+
+        this.updateExecutablePath();
 
         //if editor.formatOnSave=true, change timeout to 5000
         var editorConfig = workspace.getConfiguration('editor', null);
@@ -68,6 +72,58 @@ class PHPCSFixer {
         }
     }
 
+    updateExecutablePath() {
+        let availExecutablePath = '';
+        let availPharPath = '';
+        let firstExecutablePath = this.executablePathList.slice(0, 1)[0] || '';
+        let firstPharPath = this.pharPaths.slice(0, 1)[0] || '';
+        let lastExecutablePath = this.executablePathList.slice(-1)[0] || '';
+        let lastPharPath = this.pharPaths.slice(-1)[0] || '';
+        let phpExecutablePath = workspace.getConfiguration('php').get('validate.executablePath', 'php') || 'php';
+
+        for (let executablePath of this.executablePathList) {
+            if (workspace.workspaceFolders != undefined) {
+                executablePath = executablePath.replace('${workspaceRoot}', this.getActiveWorkspacePath() || workspace.workspaceFolders[0].uri.fsPath);
+            }
+            if (fs.existsSync(executablePath)) {
+                availExecutablePath = executablePath;
+                break;
+            }
+        }
+
+        if (firstExecutablePath.endsWith('.phar')) {
+            firstPharPath = firstExecutablePath;
+            firstExecutablePath = phpExecutablePath;
+        } else {
+            firstPharPath = undefined;
+            firstExecutablePath = firstExecutablePath;
+        }
+
+        if (lastExecutablePath.endsWith('.phar')) {
+            lastPharPath = lastExecutablePath;
+            lastExecutablePath = phpExecutablePath;
+        } else {
+            lastPharPath = undefined;
+            lastExecutablePath = lastExecutablePath;
+        }
+
+        if (availExecutablePath.endsWith('.phar')) {
+            this.realPharPath = availExecutablePath;
+            this.realExecutablePath = phpExecutablePath;
+        } else {
+            this.realPharPath = undefined;
+            this.realExecutablePath = availExecutablePath;
+        }
+
+        if (this.realExecutablePath) {
+            this.executablePath = this.realExecutablePath;
+            this.pharPath = this.realPharPath;
+        } else {
+            this.executablePath = firstExecutablePath;
+            this.pharPath = firstPharPath;
+        }
+    }
+
     getActiveWorkspacePath() {
         let folder = workspace.getWorkspaceFolder(window.activeTextEditor.document.uri);
         if (folder != undefined) {
@@ -76,15 +132,12 @@ class PHPCSFixer {
         return undefined;
     }
 
-    getArgs(fileName) {
-        if (workspace.workspaceFolders != undefined) {
-            this.realExecutablePath = this.executablePath.replace('${workspaceRoot}', this.getActiveWorkspacePath() || workspace.workspaceFolders[0].uri.fsPath);
-        } else
-            this.realExecutablePath = undefined;
+    getArgs(fileName, pharPath) {
+        // this.updateExecutablePath();
 
         let args = ['fix', '--using-cache=no', fileName];
-        if (this.pharPath != null) {
-            args.unshift(this.pharPath);
+        if (pharPath) {
+            args.unshift(pharPath);
         }
         let useConfig = false;
         if (this.config.length > 0) {
@@ -159,8 +212,12 @@ class PHPCSFixer {
             opts.cwd = workingDirectory;
         }
 
-        let args = this.getArgs(filePath);
-        let exec = cp.spawn(this.realExecutablePath || this.executablePath, args, opts);
+        this.updateExecutablePath();
+        let args = this.getArgs(filePath, this.pharPath);
+        let exec = cp.spawn(this.executablePath, args, opts);
+
+        // window.showInformationMessage('php-cs-fixer: formatting... command: ' + this.executablePath + ' ' + args.join(' ') + ', options:' +  JSON.stringify(opts));
+        // window.showInformationMessage('php-cs-fixer: formatting...');
 
         let promise = new Promise((resolve, reject) => {
             exec.on("error", err => {
@@ -173,6 +230,7 @@ class PHPCSFixer {
             });
             exec.on("exit", code => {
                 if (code == 0) {
+                    window.showInformationMessage('php-cs-fixer: fomatted !');
                     if (isDiff) {
                         resolve(filePath);
                     } else {
@@ -228,8 +286,9 @@ class PHPCSFixer {
             opts.cwd = path.dirname(filePath);
         }
 
-        let args = this.getArgs(filePath);
-        let exec = cp.spawn(this.realExecutablePath || this.executablePath, args, opts);
+        this.updateExecutablePath();
+        let args = this.getArgs(filePath, this.pharPath);
+        let exec = cp.spawn(this.executablePath, args, opts);
 
         exec.on("error", err => {
             this.output(err);
@@ -486,7 +545,9 @@ class PHPCSFixer {
     }
 
     errorTip() {
+        this.updateExecutablePath();
         // window.showErrorMessage('PHP CS Fixer: ' + err.message + ". executablePath not found. ");
+        // window.showErrorMessage('PHP CS Fixer: executablePath (' + (this.executablePath) + ') not found, please check your settings.', 'OK');
         window.showErrorMessage('PHP CS Fixer: executablePath not found, please check your settings. It will set to built-in php-cs-fixer.phar. Try again!', 'OK');
         let config = workspace.getConfiguration('php-cs-fixer');
         config.update('executablePath', '${extensionPath}' + path.sep + 'php-cs-fixer.phar', true);
@@ -495,9 +556,15 @@ class PHPCSFixer {
     checkUpdate() {
         setTimeout(() => {
             let config = workspace.getConfiguration('php-cs-fixer');
-            let executablePath = config.get('executablePath', 'php-cs-fixer');
+            let executablePathList = config.get('executablePath', 'php-cs-fixer').split(';');
             let lastDownload = config.get('lastDownload', 1);
-            if (lastDownload !== 0 && executablePath == '${extensionPath}' + path.sep + 'php-cs-fixer.phar' && lastDownload + 1000 * 3600 * 24 * 10 < (new Date()).getTime()) {
+            let useBuiltInPhar = false;
+            for (let executablePath of this.executablePathList) {
+                if (executablePath == '${extensionPath}' + path.sep + 'php-cs-fixer.phar') {
+                    useBuiltInPhar = true;
+                }
+            }
+            if (lastDownload !== 0 && useBuiltInPhar && lastDownload + 1000 * 3600 * 24 * 10 < (new Date()).getTime()) {
                 console.log('php-cs-fixer: check for updating...');
                 let download = require('download');
                 download('https://cs.sensiolabs.org/download/php-cs-fixer-v2.phar', __dirname, {
